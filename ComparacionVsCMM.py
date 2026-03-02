@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import io
 from io import StringIO
+import plotly.express as px
+from xlsxwriter.utility import xl_col_to_name
 
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="Comparación L / R", layout="wide")
+st.set_page_config(page_title="Comparación cmm", layout="wide")
 st.title("Comparación Vs CMM")
 
 # =========================
@@ -115,6 +117,8 @@ if archivo_L and archivo_R:
     df_R = leer_txt(archivo_R)
 
     df = pd.concat([df_L, df_R], ignore_index=True)
+    for col in ["T-Test", "F-Test", "Corr. Coef.", "Offset"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # =========================
     # LIMPIEZA
@@ -129,8 +133,10 @@ if archivo_L and archivo_R:
     # EXTRAER NOMBRE / EJE
     # =========================
     df["Nombre"] = df[col_cycle].str.extract(r"(^\d+)")
+    #df["Punto"] = df[col_cycle].str.extract(r"^(.+?)(?=\[)")
     df["Eje"] = df[col_cycle].str.extract(r"\[([A-Z])\]")
-
+    df["Base"] = df[col_cycle].str.extract(r"^(.+?)(?=[LR]\[)")
+    df["Lado"] = df[col_cycle].str.extract(r"([LR])(?=\[)")
     # =========================
     # FILTROS INTERACTIVOS
     # =========================
@@ -156,6 +162,15 @@ if archivo_L and archivo_R:
         df["Eje"].isin(eje_sel)
     ]
 
+    df_filtrado = df_filtrado.copy()
+
+    # Limpiar nombres de columnas (quita espacios invisibles)
+    df_filtrado.columns = df_filtrado.columns.str.strip()
+
+    # Limpiar espacios dentro de las celdas (blindaje extra)
+    df_filtrado = df_filtrado.applymap(
+        lambda x: x.strip() if isinstance(x, str) else x
+    )
     # =========================
     # ORDEN TIPO EXCEL
     # =========================
@@ -183,13 +198,67 @@ if archivo_L and archivo_R:
     )
 
     st.dataframe(styled_df, use_container_width=True)
+    st.subheader("📊 Heatmap Histórico")
 
+    columnas_fecha = [
+        col for col in df_filtrado.columns
+        if "/" in col and ":" in col
+    ]
+
+    columnas_fecha = []
+
+    for col in df_filtrado.columns:
+        try:
+            pd.to_datetime(col)
+            columnas_fecha.append(col)
+        except:
+            pass
+
+    df_heat = df_filtrado.set_index(col_cycle)[columnas_fecha]
+
+    fig = px.imshow(
+        df_heat,
+        aspect="auto",
+        color_continuous_scale="RdYlGn_r"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.subheader("📈 Tendencia por Fecha")
+
+    # Detectar automáticamente columnas que son fechas
+    columnas_fecha = [
+        col for col in df_filtrado.columns
+        if "/" in col and ":" in col
+    ]
+
+    # Selector de Cycle Time
+    cycle_sel = st.selectbox(
+        "Selecciona Cycle Time",
+        df_filtrado[col_cycle].unique()
+    )
+
+    #df_graf = df_filtrado[df_filtrado[col_cycle] == cycle_sel]
+    df_filtrado[col_cycle] = df_filtrado[col_cycle].str.strip()
+    cycle_sel = cycle_sel.strip()
+
+    df_graf = df_filtrado[df_filtrado[col_cycle] == cycle_sel]
+
+    # Transponer para convertir columnas en eje X
+    serie = df_graf[columnas_fecha].T
+    serie.columns = ["Valor"]
+
+    # Convertir índice a datetime
+    serie.index = pd.to_datetime(serie.index, errors="coerce")
+
+    st.line_chart(serie)
     # =========================
     # DESCARGAR A EXCEL PRO (CON COLORES + FILTROS + AUTOAJUSTE + KPIs)
     # =========================
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+
+        df_filtrado["Punto"] = df_filtrado["Nombre"].astype(str).str.strip()
         df_filtrado.to_excel(writer, index=False, sheet_name="Comparacion")
 
         workbook = writer.book
@@ -243,22 +312,22 @@ if archivo_L and archivo_R:
         col_corr = df_filtrado.columns.get_loc("Corr. Coef.")
         col_offset = df_filtrado.columns.get_loc("Offset")
 
-        for row_num, row in df_filtrado.iterrows():
-            excel_row = row_num + 1
+        #for row_num, row in df_filtrado.iterrows():
+        #    excel_row = row_num + 1
 
-            # Bordes generales
+        for excel_row, (_, row) in enumerate(df_filtrado.iterrows(), start=1):
+
             for col_num in range(len(df_filtrado.columns)):
-                valor = row[col_num]
+                valor = row.iloc[col_num]
 
                 if pd.isna(valor) or valor in [float("inf"), float("-inf")]:
                     worksheet.write(excel_row, col_num, "", format_border)
                 else:
                     worksheet.write(excel_row, col_num, valor, format_border)
 
-
             # T-Test
             try:
-                if float(row["T-Test"]) < 0.005:
+                if row["T-Test"] < 0.005:
                     worksheet.write(excel_row, col_t, row["T-Test"], format_green)
                 else:
                     worksheet.write(excel_row, col_t, row["T-Test"], format_red)
@@ -267,7 +336,7 @@ if archivo_L and archivo_R:
 
             # F-Test
             try:
-                if float(row["F-Test"]) < 0.005:
+                if row["F-Test"] < 0.005:
                     worksheet.write(excel_row, col_f, row["F-Test"], format_red)
                 else:
                     worksheet.write(excel_row, col_f, row["F-Test"], format_green)
@@ -276,10 +345,10 @@ if archivo_L and archivo_R:
 
             # Corr. Coef.
             try:
-                val = float(row["Corr. Coef."])
+                val = row["Corr. Coef."]
                 if val >= 0.95:
                     worksheet.write(excel_row, col_corr, val, format_green)
-                elif 0.90 <= val <= 0.94:
+                elif 0.90 <= val < 0.95:
                     worksheet.write(excel_row, col_corr, val, format_yellow)
                 else:
                     worksheet.write(excel_row, col_corr, val, format_red)
@@ -288,33 +357,177 @@ if archivo_L and archivo_R:
 
             # Offset
             try:
-                val = float(row["Offset"])
+                val = row["Offset"]
                 if abs(val) > 0.5:
                     worksheet.write(excel_row, col_offset, val, format_purple)
             except:
                 pass
 
-        # =========================
-        # HOJA RESUMEN KPI
-        # =========================
-        resumen = workbook.add_worksheet("Resumen")
+        # ======================================================
+        # ================= DASHBOARD DINÁMICO =================
+        # ======================================================
 
         total = len(df_filtrado)
         fallas_t = (pd.to_numeric(df_filtrado["T-Test"], errors="coerce") >= 0.005).sum()
         fallas_corr = (pd.to_numeric(df_filtrado["Corr. Coef."], errors="coerce") < 0.95).sum()
         offsets_altos = (pd.to_numeric(df_filtrado["Offset"], errors="coerce").abs() > 0.5).sum()
 
-        resumen.write("A1", "Total mediciones")
-        resumen.write("B1", total)
+        dashboard = workbook.add_worksheet("Dashboard")
 
-        resumen.write("A2", "T-Test fuera de rango")
-        resumen.write("B2", fallas_t)
+        dashboard.write("A1", "DASHBOARD EJECUTIVO", format_header)
 
-        resumen.write("A3", "Correlación baja (<0.95)")
-        resumen.write("B3", fallas_corr)
+        dashboard.write("A3", "Total Mediciones")
+        dashboard.write("B3", total)
 
-        resumen.write("A4", "Offset alto (>0.5)")
-        resumen.write("B4", offsets_altos)
+        dashboard.write("A4", "T-Test fuera de rango")
+        dashboard.write("B4", fallas_t)
+
+        dashboard.write("A5", "Correlación baja")
+        dashboard.write("B5", fallas_corr)
+
+        dashboard.write("A6", "Offset alto")
+        dashboard.write("B6", offsets_altos)
+
+        # ================= DROPDOWN POR PUNTO =================
+
+        puntos_unicos = (
+            df_filtrado["Punto"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        dashboard.write("A9", "Selecciona Punto:")
+
+        col_lista = 25  # Columna Z
+
+        for i, valor in enumerate(puntos_unicos):
+            dashboard.write(i, col_lista, valor)
+
+        rango_dropdown = f"=Dashboard!${xl_col_to_name(col_lista)}$1:${xl_col_to_name(col_lista)}${len(puntos_unicos)}"
+
+        dashboard.data_validation(
+            "B9",
+            {
+                "validate": "list",
+                "source": rango_dropdown,
+            },
+        )
+
+        dashboard.set_column(col_lista, col_lista, None, None, {"hidden": True})
+
+        # ================= COLUMNAS FECHA =================
+
+        columnas_fecha = []
+
+        for col in df_filtrado.columns:
+            try:
+                pd.to_datetime(col)
+                columnas_fecha.append(col)
+            except:
+                pass
+
+        fila_inicio = 12
+        dashboard.write_row(
+            fila_inicio, 0,
+            ["Fecha", "Lado Izq", "Lado Der", "Diferencia"]
+        )
+
+        # Columnas necesarias
+        col_punto = df_filtrado.columns.get_loc("Punto")
+        col_lado = df_filtrado.columns.get_loc("Lado")
+
+        col_punto_excel = xl_col_to_name(col_punto)
+        col_lado_excel = xl_col_to_name(col_lado)
+
+        rango_punto = f"Comparacion!${col_punto_excel}$2:${col_punto_excel}${len(df_filtrado)+1}"
+        rango_lado = f"Comparacion!${col_lado_excel}$2:${col_lado_excel}${len(df_filtrado)+1}"
+
+        for i, fecha in enumerate(columnas_fecha):
+
+            col_idx = df_filtrado.columns.get_loc(fecha)
+            col_excel = xl_col_to_name(col_idx)
+
+            rango_valores = f"Comparacion!${col_excel}$2:${col_excel}${len(df_filtrado)+1}"
+
+            formula_L = (
+                f'=IFERROR(AVERAGEIFS('
+                f'{rango_valores},'
+                f'{rango_punto},$B$9,'
+                f'{rango_lado},"L"),0)'
+            )
+
+            formula_R = (
+                f'=IFERROR(AVERAGEIFS('
+                f'{rango_valores},'
+                f'{rango_punto},$B$9,'
+                f'{rango_lado},"R"),0)'
+            )
+
+            dashboard.write(fila_inicio + i + 1, 0, fecha)
+            dashboard.write_formula(fila_inicio + i + 1, 1, formula_L)
+            dashboard.write_formula(fila_inicio + i + 1, 2, formula_R)
+
+            dashboard.write_formula(
+                fila_inicio + i + 1,
+                3,
+                f"=B{fila_inicio+i+2}-C{fila_inicio+i+2}"
+            )
+
+        # ================= GRAFICA DINÁMICA =================
+
+        chart_dyn = workbook.add_chart({"type": "line"})
+
+        chart_dyn.add_series({
+            "name": "Lado Izquierdo",
+            "categories": ["Dashboard", fila_inicio + 1, 0, fila_inicio + len(columnas_fecha), 0],
+            "values": ["Dashboard", fila_inicio + 1, 1, fila_inicio + len(columnas_fecha), 1],
+        })
+
+        chart_dyn.add_series({
+            "name": "Lado Derecho",
+            "categories": ["Dashboard", fila_inicio + 1, 0, fila_inicio + len(columnas_fecha), 0],
+            "values": ["Dashboard", fila_inicio + 1, 2, fila_inicio + len(columnas_fecha), 2],
+        })
+
+        chart_dyn.add_series({
+            "name": "Diferencia",
+            "categories": ["Dashboard", fila_inicio + 1, 0, fila_inicio + len(columnas_fecha), 0],
+            "values": ["Dashboard", fila_inicio + 1, 3, fila_inicio + len(columnas_fecha), 3],
+        })
+
+        chart_dyn.set_title({"name": "Comparación Dinámica L vs R"})
+        chart_dyn.set_style(10)
+
+        dashboard.insert_chart("F12", chart_dyn)
+
+        # ================= TOP 10 OFFSETS =================
+
+        df_offset_top = df_filtrado.copy()
+        df_offset_top["AbsOffset"] = df_offset_top["Offset"].abs()
+        top10 = df_offset_top.sort_values("AbsOffset", ascending=False).head(10)
+
+        fila_top = 30
+
+        dashboard.write(fila_top, 0, "Top 10 Offsets Críticos", format_header)
+
+        dashboard.write_row(fila_top + 1, 0, ["Cycle", "Offset"])
+
+        for i, row in top10.iterrows():
+            dashboard.write_row(fila_top + 2, 0, [row[col_cycle], row["Offset"]])
+            fila_top += 1
+
+        chart_offset = workbook.add_chart({"type": "column"})
+
+        chart_offset.add_series({
+            "categories": ["Dashboard", fila_top - 9, 0, fila_top - 1, 0],
+            "values": ["Dashboard", fila_top - 9, 1, fila_top - 1, 1],
+            "name": "Offset Absoluto"
+        })
+
+        chart_offset.set_title({"name": "Top 10 Offsets"})
+        dashboard.insert_chart("E30", chart_offset)
+
 
     excel_data = output.getvalue()
 
@@ -324,6 +537,7 @@ if archivo_L and archivo_R:
         file_name="Comparacion_CMM_PRO.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 else:
     st.info("Carga ambos archivos TXT para continuar")
